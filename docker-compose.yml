@@ -82,8 +82,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: lomicode-vendor-admin:latest
+    # No `image:` tag — Hostinger's deploy step runs `docker compose pull`
+    # before bringing services up, and a named image with no registry would
+    # fail with "pull access denied". Without it, compose always builds
+    # the image from ./Dockerfile when it doesn't exist locally and skips
+    # the pull entirely.
     container_name: lomicode-app
+    pull_policy: build
     restart: unless-stopped
     depends_on:
       postgres:
