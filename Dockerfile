@@ -57,6 +57,10 @@ RUN addgroup --system --gid 1001 nodejs \
 # 10 seconds for the kernel to SIGKILL.
 RUN apk add --no-cache libc6-compat openssl tini
 
+# tsx is used by the entrypoint to run the first-boot seed script. Install
+# globally as root before we drop privileges to the nextjs user.
+RUN npm install -g tsx@4 --no-audit --no-fund
+
 # 1. Standalone server bundle (Next.js writes this when output: 'standalone')
 COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
 # 2. Static assets that the standalone server doesn't pack itself

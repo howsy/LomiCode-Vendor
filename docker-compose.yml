@@ -1,19 +1,28 @@
-# Production compose file for the LomiCode Vendor Admin.
+# LomiCode Vendor Admin — production compose file.
 #
-# Brings up four services on a single VPS:
-#   1. postgres — primary database (no host port; private network only)
-#   2. minio    — S3-compatible storage for POS release uploads
-#   3. app      — the Next.js admin (Dockerfile-built, runs migrations on start)
-#   4. caddy    — reverse proxy + automatic Let's Encrypt TLS
+# Designed to "just compose": every environment variable has a sensible
+# default, so this file runs with ZERO configuration. The first boot uses
+# baked-in placeholder credentials and serves over HTTP on port 80.
 #
-# All sensitive values come from a side-car .env.production file you keep
-# OUT of git. See .env.production.example for the keys you need to fill.
+# Once it's up, override any of these variables (via Hostinger's Environment
+# tab, an .env file, or your CI) for hardening:
 #
-# To deploy:
-#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#   DOMAIN              your domain → flips Caddy into auto-HTTPS mode
+#   NEXTAUTH_URL        https://your-domain
+#   POSTGRES_PASSWORD   replace the default
+#   S3_ACCESS_KEY       MinIO root + app credential
+#   S3_SECRET_KEY       MinIO root + app credential
+#   ADMIN_EMAIL         Let's Encrypt cert-expiry contact
 #
-# To upgrade after pulling new code:
-#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build app
+# NEXTAUTH_SECRET is generated automatically on first boot if you don't
+# supply one — see docker-entrypoint.sh.
+#
+# Deploy:
+#   docker compose up -d --build
+#
+# Pull updates and rebuild only the app:
+#   git pull
+#   docker compose up -d --build app
 
 services:
   postgres:
@@ -23,7 +32,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-lomicode_admin}
       POSTGRES_USER: ${POSTGRES_USER:-lomicode}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lomicode-change-me}
     volumes:
       - lomicode_pg:/var/lib/postgresql/data
     networks: [internal]
@@ -39,8 +48,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?S3_ACCESS_KEY must be set}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?S3_SECRET_KEY must be set}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-lomicode}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-lomicode-change-me}
     volumes:
       - lomicode_minio:/data
     networks: [internal]
@@ -51,7 +60,7 @@ services:
       retries: 5
 
   # One-shot job that creates the releases bucket if it doesn't exist.
-  # Runs every time compose comes up, but `mc mb -p` makes it idempotent.
+  # Idempotent — `mc mb -p` ignores "already exists".
   minio-init:
     image: minio/mc:latest
     container_name: lomicode-minio-init
@@ -61,7 +70,7 @@ services:
     networks: [internal]
     entrypoint: >
       /bin/sh -c "
-      until /usr/bin/mc alias set local http://minio:9000 ${S3_ACCESS_KEY} ${S3_SECRET_KEY} >/dev/null 2>&1; do
+      until /usr/bin/mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-lomicode} ${S3_SECRET_KEY:-lomicode-change-me} >/dev/null 2>&1; do
         echo 'waiting for minio...'; sleep 2;
       done;
       /usr/bin/mc mb -p local/${S3_BUCKET:-releases} || true;
@@ -82,26 +91,39 @@ services:
       minio:
         condition: service_healthy
     environment:
-      # ─── App ──────────────────────────────────────────────────────────
       NODE_ENV: production
       PORT: "3000"
       # ─── Auth ─────────────────────────────────────────────────────────
-      NEXTAUTH_URL: ${NEXTAUTH_URL:?NEXTAUTH_URL must be your https domain, e.g. https://admin.lomicode.com}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET must be a long random string}
-      # ─── DB (uses the internal docker network — `postgres` is the host) ─
-      DATABASE_URL: postgresql://${POSTGRES_USER:-lomicode}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-lomicode_admin}?schema=public
+      # NEXTAUTH_URL flips to https when you set DOMAIN to a real hostname.
+      # Until then we serve over HTTP and the URL is a placeholder; sign-in
+      # cookies require this to match what the browser sees, so the entrypoint
+      # script also rewrites it on first boot when DOMAIN is set.
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      # NEXTAUTH_SECRET is auto-generated on first boot when empty — see
+      # docker-entrypoint.sh. Persisted in the lomicode_secrets volume so
+      # the same secret survives across container recreates (else every
+      # boot would invalidate every session).
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
+      # ─── DB ───────────────────────────────────────────────────────────
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lomicode}:${POSTGRES_PASSWORD:-lomicode-change-me}@postgres:5432/${POSTGRES_DB:-lomicode_admin}?schema=public
       # ─── S3 / MinIO ───────────────────────────────────────────────────
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_REGION: ${S3_REGION:-us-east-1}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-lomicode}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-lomicode-change-me}
       S3_BUCKET: ${S3_BUCKET:-releases}
       S3_FORCE_PATH_STYLE: "true"
       # ─── Subscription / billing ───────────────────────────────────────
       SUBSCRIPTION_GRACE_DAYS: ${SUBSCRIPTION_GRACE_DAYS:-7}
+      # ─── First-boot seed (only runs if no users exist yet) ────────────
+      SEED_VENDOR_EMAIL: ${SEED_VENDOR_EMAIL:-admin@lomicode.local}
+      SEED_VENDOR_PASSWORD: ${SEED_VENDOR_PASSWORD:-ChangeMe!2026}
+      SEED_VENDOR_NAME: ${SEED_VENDOR_NAME:-LomiCode Admin}
+    volumes:
+      # Holds auto-generated secrets that need to survive container rebuilds
+      # (NEXTAUTH_SECRET above all). Tiny — kilobytes.
+      - lomicode_secrets:/app/.secrets
     networks: [internal, web]
-    # No host port published. caddy reverse-proxies to app:3000 over the
-    # internal network — keeps Next directly off the public internet.
     expose:
       - "3000"
 
@@ -115,23 +137,25 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data         # holds Let's Encrypt certs — survive restarts
+      - caddy_data:/data
       - caddy_config:/config
     environment:
-      DOMAIN: ${DOMAIN:?DOMAIN must be set, e.g. admin.lomicode.com}
+      # When DOMAIN is unset we fall back to `:80` — Caddy serves plain
+      # HTTP on port 80 with no cert request. Set DOMAIN later (with DNS
+      # pointing at this VPS) and Caddy switches to auto-HTTPS on its
+      # next start.
+      DOMAIN: ${DOMAIN:-:80}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
     networks: [web, internal]
 
 volumes:
   lomicode_pg:
   lomicode_minio:
+  lomicode_secrets:
   caddy_data:
   caddy_config:
 
 networks:
-  # `internal` is private — no external connectivity. Postgres + MinIO
-  # only see the app on this network.
   internal:
     internal: false
-  # `web` carries traffic from the host's port 80/443 into Caddy.
   web:
