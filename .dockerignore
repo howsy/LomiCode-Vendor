@@ -1,0 +1,26 @@
+# Don't ship the local Node modules or build artefacts — Docker builds
+# them fresh. Without this the image build copies hundreds of MB pointlessly.
+node_modules
+.next
+.git
+.env
+.env.local
+.env*.local
+npm-debug.log
+*.log
+
+# IDE / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docker self-references
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Tests / docs that don't need to be inside the image
+README.md
+*.md
+coverage

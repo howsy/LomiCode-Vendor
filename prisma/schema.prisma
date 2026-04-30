@@ -1,0 +1,458 @@
+// LomiCode Vendor Admin schema.
+// Control plane (vendor-owned) + Mirror (per-tenant business data replicated from POS).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------- ENUMS -----------------------
+
+enum UserRole {
+  // Order matters for migrations — add new variants at the end of the enum.
+  vendor_admin
+  vendor_support
+  tenant_owner
+  tenant_staff
+  vendor_super       // can manage other vendor users + reset their 2FA
+}
+
+enum TenantStatus {
+  active
+  suspended
+  cancelled
+}
+
+enum UpdateChannel {
+  stable
+  beta
+  pinned
+}
+
+enum SubscriptionStatus {
+  active
+  expired
+  cancelled
+  trial
+}
+
+enum BillingPeriod {
+  trial
+  monthly
+  six_month
+  yearly
+  lifetime
+}
+
+enum InvoiceStatus {
+  open
+  paid
+  void
+}
+
+// ----------------------- CONTROL PLANE -----------------------
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  name          String
+  role          UserRole
+  tenantId      String?  @map("tenant_id")
+  isActive      Boolean  @default(true) @map("is_active")
+  // Two-factor auth (TOTP). totpSecret is set during setup BEFORE the user
+  // verifies a code; totpEnabled flips to true only after first valid code.
+  // totpRequired is super-admin enforced — when on, user can't self-disable.
+  totpSecret         String?  @map("totp_secret")
+  totpEnabled        Boolean  @default(false) @map("totp_enabled")
+  totpRecoveryCodes  Json?    @map("totp_recovery_codes")
+  totpRequired       Boolean  @default(false) @map("totp_required")
+  // Set after a super-admin password reset. Forces the user through a
+  // change-password page before they can navigate anywhere else.
+  mustChangePassword Boolean  @default(false) @map("must_change_password")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  tenant        Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  paidInvoices  Invoice[] @relation("InvoicePaidBy")
+  auditEntries  AuditLog[]
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+model Tenant {
+  id             String        @id @default(uuid())
+  name           String
+  contactEmail   String?       @map("contact_email")
+  contactName    String?       @map("contact_name")
+  status         TenantStatus  @default(active)
+  licenseKey     String        @unique @map("license_key")
+  channel        UpdateChannel @default(stable)
+  pinnedVersion  String?       @map("pinned_version")
+  maxDevices     Int           @default(1) @map("max_devices")
+  // Customer-facing QR menu
+  publicSlug         String?  @unique @map("public_slug")     // /menu/<slug>
+  publicMenuEnabled  Boolean  @default(true) @map("public_menu_enabled")
+  brandColor         String?  @map("brand_color")              // hex e.g. "#f97316"
+  logoUrl            String?  @map("logo_url")
+  tagline            String?
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  users          User[]
+  subscriptions  Subscription[]
+  invoices       Invoice[]
+  devices        Device[]
+  events         Event[]
+
+  branches       Branch[]
+  staff          Staff[]
+  categories     Category[]
+  menus          Menu[]
+  items          Item[]
+  tables         RestTable[]
+  orders         Order[]
+  orderItems     OrderItem[]
+
+  @@map("tenants")
+}
+
+model Plan {
+  id              String   @id @default(uuid())
+  name            String
+  currency        String   @default("USD")
+  monthlyPrice    Decimal? @db.Decimal(12, 2) @map("monthly_price")
+  sixMonthPrice   Decimal? @db.Decimal(12, 2) @map("six_month_price")
+  yearlyPrice     Decimal? @db.Decimal(12, 2) @map("yearly_price")
+  lifetimePrice   Decimal? @db.Decimal(12, 2) @map("lifetime_price")
+  // URL the POS opens for online checkout. Tokens replaced at runtime:
+  // {plan_id}, {period}, {fingerprint}, {device_uuid}, {amount}, {currency}.
+  purchaseUrlTemplate String? @map("purchase_url_template")
+  isActive        Boolean  @default(true) @map("is_active")
+  sortOrder       Int      @default(0) @map("sort_order")
+  featuresJson    Json     @map("features_json") @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id          String             @id @default(uuid())
+  tenantId    String             @map("tenant_id")
+  planId      String?            @map("plan_id")              // null for trial
+  period      BillingPeriod      @default(monthly)
+  status      SubscriptionStatus @default(active)
+  startedAt   DateTime           @map("started_at")
+  expiresAt   DateTime           @map("expires_at")            // far-future for lifetime
+  cancelledAt DateTime?          @map("cancelled_at")
+  paymentRef  String?            @map("payment_ref")           // payment processor reference
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan        Plan?              @relation(fields: [planId], references: [id])
+  invoices    Invoice[]
+
+  @@index([tenantId, status])
+  @@index([expiresAt])
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id              String        @id @default(uuid())
+  subscriptionId  String        @map("subscription_id")
+  tenantId        String        @map("tenant_id")
+  amount          Decimal       @db.Decimal(12, 2)
+  currency        String        @default("USD")
+  status          InvoiceStatus @default(open)
+  issuedAt        DateTime      @default(now()) @map("issued_at")
+  paidAt          DateTime?     @map("paid_at")
+  paidByUserId    String?       @map("paid_by_user_id")
+  note            String?
+
+  subscription    Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  paidBy          User?         @relation("InvoicePaidBy", fields: [paidByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("invoices")
+}
+
+model Device {
+  id                  String   @id @default(uuid())
+  tenantId            String   @map("tenant_id")
+  deviceUuid          String   @unique @map("device_uuid")
+  hardwareFingerprint String?  @map("hardware_fingerprint")    // Windows MachineGuid
+  isActive            Boolean  @default(true) @map("is_active")
+  appVersion          String?  @map("app_version")
+  os                  String?
+  hostname            String?
+  firstSeenAt         DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt          DateTime @default(now()) @map("last_seen_at")
+
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  cursor        SyncCursor?
+  events        Event[]
+
+  @@index([tenantId])
+  @@index([lastSeenAt])
+  @@map("devices")
+}
+
+model SyncCursor {
+  deviceId          String @id @map("device_id")
+  lastChangeLogId   BigInt @default(0) @map("last_change_log_id")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  device            Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("sync_cursor")
+}
+
+model Release {
+  id          String        @id @default(uuid())
+  version     String
+  channel     UpdateChannel
+  fileKey     String        @map("file_key")    // MinIO object key for the .exe / .dmg
+  ymlKey      String        @map("yml_key")     // electron-updater metadata file key
+  signature   String?
+  mandatory   Boolean       @default(false)
+  notes       String?
+  publishedAt DateTime      @default(now()) @map("published_at")
+  publishedByUserId String?  @map("published_by_user_id")
+
+  @@unique([version, channel])
+  @@index([channel, publishedAt])
+  @@map("releases")
+}
+
+model Event {
+  id         String   @id @default(uuid())
+  tenantId   String?  @map("tenant_id")
+  deviceId   String?  @map("device_id")
+  type       String   // 'sync_ok' | 'sync_failed' | 'version_installed' | 'sub_expiring' | 'printer_offline' | ...
+  payloadJson Json?   @map("payload_json")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant     Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  device     Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([type, createdAt])
+  @@map("events")
+}
+
+model VendorSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("vendor_settings")
+}
+
+// Marketing-site product catalogue. Edited by vendor_super on /products,
+// rendered on the public landing page at / and /products/[slug].
+model Product {
+  id          String   @id @default(uuid())
+  slug        String   @unique                    // URL slug, e.g. "restaurant-pos"
+  name        String                              // "Restaurant POS"
+  tagline     String                              // 1-line, shown on cards + hero
+  description String?                             // long-form text for detail page
+  iconEmoji   String?  @map("icon_emoji")         // single emoji shown on cards
+  accentColor String?  @map("accent_color")       // hex, drives card gradient
+  // Array of { title, description, icon? } objects rendered on detail page
+  featuresJson Json?   @map("features_json")
+  ctaLabel    String?  @map("cta_label")          // "Get started", "Learn more", …
+  ctaUrl      String?  @map("cta_url")            // external link or in-app route
+  sortOrder   Int      @default(0) @map("sort_order")
+  isPublished Boolean  @default(true) @map("is_published")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([isPublished, sortOrder])
+  @@map("products")
+}
+
+// Tracks per-hardware claims so we can rate-limit trials and detect license
+// transfers across machines.
+model LicenseClaim {
+  id                  String   @id @default(uuid())
+  hardwareFingerprint String   @map("hardware_fingerprint")
+  tenantId            String?  @map("tenant_id")
+  email               String?
+  kind                String   // 'trial' | 'paid' | 'manual'
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@index([hardwareFingerprint])
+  @@map("license_claims")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorUserId  String?  @map("actor_user_id")
+  action       String
+  targetType   String?  @map("target_type")
+  targetId     String?  @map("target_id")
+  payloadJson  Json?    @map("payload_json")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  actor        User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+// ----------------------- MIRROR (replicated from POS) -----------------------
+// Same UUID PKs the POS generated; tagged with tenant_id so reports can filter.
+// Vendor admin never writes here from the UI — only the sync applier does.
+
+model Branch {
+  id        String   @id
+  tenantId  String   @map("tenant_id")
+  name      String
+  nameAr    String?  @map("name_ar")
+  nameKu    String?  @map("name_ku")
+  address   String?
+  phone     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("branches")
+}
+
+model Staff {
+  id        String   @id
+  tenantId  String   @map("tenant_id")
+  branchId  String   @map("branch_id")
+  name      String
+  pin       String?
+  role      String?
+  isActive  Boolean  @default(true) @map("is_active")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, branchId])
+  @@map("staff")
+}
+
+model Category {
+  id        String   @id
+  tenantId  String   @map("tenant_id")
+  branchId  String   @map("branch_id")
+  name      String
+  nameAr    String?  @map("name_ar")
+  nameKu    String?  @map("name_ku")
+  sortOrder Int      @default(0) @map("sort_order")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, branchId])
+  @@map("categories")
+}
+
+// Menus group items for the cashier-facing POS and the public QR menu.
+// A branch may have many menus (Lunch, Dinner, Ramadan…) but only one is
+// active at a time. Reports always show every item across every menu — the
+// active flag only narrows what cashiers and customers see live.
+model Menu {
+  id        String   @id
+  tenantId  String   @map("tenant_id")
+  branchId  String   @map("branch_id")
+  name      String
+  nameAr    String?  @map("name_ar")
+  nameKu    String?  @map("name_ku")
+  isActive  Boolean  @default(false) @map("is_active")
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items     Item[]
+
+  @@index([tenantId, branchId])
+  @@index([tenantId, branchId, isActive])
+  @@map("menus")
+}
+
+model Item {
+  id          String   @id
+  tenantId    String   @map("tenant_id")
+  branchId    String   @map("branch_id")
+  categoryId  String   @map("category_id")
+  // Nullable so older payloads (pre-multi-menu) still apply cleanly. The
+  // POS migrate fills in a default menu_id for every item before the next
+  // sync, so this should be NULL only briefly during the rollout window.
+  menuId      String?  @map("menu_id")
+  name        String
+  nameAr      String?  @map("name_ar")
+  nameKu      String?  @map("name_ku")
+  price       Decimal  @db.Decimal(12, 2)
+  imageUrl    String?  @map("image_url")
+  isAvailable Boolean  @default(true) @map("is_available")
+  sortOrder   Int      @default(0) @map("sort_order")
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  menu        Menu?    @relation(fields: [menuId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, categoryId])
+  @@index([tenantId, menuId])
+  @@map("items")
+}
+
+model RestTable {
+  id        String  @id
+  tenantId  String  @map("tenant_id")
+  branchId  String  @map("branch_id")
+  label     String
+  capacity  Int     @default(4)
+  status    String  @default("free")
+
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, branchId])
+  @@map("tables")
+}
+
+model Order {
+  id          String   @id
+  tenantId    String   @map("tenant_id")
+  branchId    String   @map("branch_id")
+  staffId     String?  @map("staff_id")
+  tableNumber String?  @map("table_number")
+  status      String   @default("pending")
+  orderType   String   @default("dine_in") @map("order_type")
+  total       Decimal  @db.Decimal(12, 2)
+  notes       String?
+  createdAt   DateTime @map("created_at")
+  updatedAt   DateTime @map("updated_at")
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items       OrderItem[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, branchId, createdAt])
+  @@index([tenantId, staffId, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String  @id
+  tenantId  String  @map("tenant_id")
+  orderId   String  @map("order_id")
+  itemId    String  @map("item_id")
+  quantity  Int
+  unitPrice Decimal @db.Decimal(12, 2) @map("unit_price")
+  notes     String?
+
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, orderId])
+  @@index([tenantId, itemId])
+  @@map("order_items")
+}

@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { height: 100%; }
+body {
+  @apply bg-slate-50 text-slate-800 antialiased;
+}
+.dark body {
+  /* Match the marketing site's near-black surface so vendor/tenant
+     dashboards visually continue from /. */
+  @apply bg-[#0a0a0c] text-slate-200;
+}
+
+/* Sane defaults for native form controls in dark mode — without this,
+   the OS dark-mode UI bleeds into our light forms (or vice versa). */
+.dark { color-scheme: dark; }
