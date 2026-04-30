@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { getSetting } from '@/lib/vendorSettings'
 
+export const dynamic = 'force-dynamic'   // ← Add this line
+
 // Unauthenticated. The POS calls this on the activation chooser to show the
 // list of available plans, the trial settings, and the buy URL template.
 export async function GET() {

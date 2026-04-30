@@ -79,16 +79,17 @@ services:
     restart: "no"
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # No `image:` tag — Hostinger's deploy step runs `docker compose pull`
-    # before bringing services up, and a named image with no registry would
-    # fail with "pull access denied". Without it, compose always builds
-    # the image from ./Dockerfile when it doesn't exist locally and skips
-    # the pull entirely.
+    # Pre-built image published by .github/workflows/build-and-push.yml on
+    # every push to main. Using a registry image (instead of building from
+    # ./Dockerfile here) is what makes this stack deployable to PaaS-style
+    # Docker hosts that only support `docker compose pull` (Hostinger,
+    # Coolify, Dokploy, etc.).
+    #
+    # The package must be Public on GHCR — see workflow file for the
+    # one-time settings link. Set IMAGE_TAG=<short-sha> to pin to a
+    # specific build; defaults to :latest.
+    image: ghcr.io/howsy/lomicode-vendor-admin:${IMAGE_TAG:-latest}
     container_name: lomicode-app
-    pull_policy: build
     restart: unless-stopped
     depends_on:
       postgres:
