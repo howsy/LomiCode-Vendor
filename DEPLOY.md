@@ -1,6 +1,6 @@
 # Deploying LomiCode Vendor Admin to a VPS
 
-This stack runs entirely from `docker-compose.prod.yml`. Postgres, MinIO,
+This stack runs entirely from `docker-compose.yml`. Postgres, MinIO,
 the Next.js app, and a Caddy reverse proxy with automatic HTTPS — no
 extra runtime dependencies on the host.
 
@@ -64,7 +64,7 @@ Keep this file out of git. `.dockerignore` already excludes it from the build co
 ## 3. First boot
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+docker compose -f docker-compose.yml --env-file .env.production up -d --build
 ```
 
 What happens:
@@ -77,9 +77,9 @@ What happens:
 Watch logs while it boots:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f
+docker compose -f docker-compose.yml logs -f
 # narrow to one service:
-docker compose -f docker-compose.prod.yml logs -f app
+docker compose -f docker-compose.yml logs -f app
 ```
 
 When `caddy` says `serving https://your-domain` and `app` says `Ready in …`, open your browser at `https://<DOMAIN>`.
@@ -91,7 +91,7 @@ When `caddy` says `serving https://your-domain` and `app` says `Ready in …`, o
 The seed step doesn't run by default in production (you don't want a known seed password floating around). Run it manually once:
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production exec app \
+docker compose -f docker-compose.yml --env-file .env.production exec app \
   sh -c 'SEED_VENDOR_EMAIL="you@example.com" SEED_VENDOR_PASSWORD="$(openssl rand -base64 18)" SEED_VENDOR_NAME="You" npx tsx prisma/seed.ts'
 ```
 
@@ -104,25 +104,25 @@ The command prints the password it generated. Sign in immediately and change it 
 ```bash
 # Pull new code and rebuild only the app (Postgres / MinIO untouched)
 git pull
-docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build app
+docker compose -f docker-compose.yml --env-file .env.production up -d --build app
 
 # Tail logs
-docker compose -f docker-compose.prod.yml logs -f app
+docker compose -f docker-compose.yml logs -f app
 
 # Open a Postgres shell
-docker compose -f docker-compose.prod.yml exec postgres \
+docker compose -f docker-compose.yml exec postgres \
   psql -U lomicode -d lomicode_admin
 
 # Apply migrations manually (entrypoint already does this on every start,
 # but useful when troubleshooting)
-docker compose -f docker-compose.prod.yml --env-file .env.production exec app \
+docker compose -f docker-compose.yml --env-file .env.production exec app \
   npx prisma migrate deploy
 
 # Stop everything (data volumes survive)
-docker compose -f docker-compose.prod.yml down
+docker compose -f docker-compose.yml down
 
 # Stop AND wipe data — there is no undo
-docker compose -f docker-compose.prod.yml down -v
+docker compose -f docker-compose.yml down -v
 ```
 
 ---
@@ -139,7 +139,7 @@ set -e
 cd /opt/lomicode
 TS=$(date +%F-%H%M)
 mkdir -p backups
-docker compose -f docker-compose.prod.yml --env-file .env.production exec -T postgres \
+docker compose -f docker-compose.yml --env-file .env.production exec -T postgres \
   pg_dump -U lomicode lomicode_admin | gzip > backups/db-$TS.sql.gz
 # MinIO data — straightforward tar of the volume
 docker run --rm -v lomicode_minio:/data -v $PWD/backups:/out alpine \
@@ -152,7 +152,7 @@ ls -1tr backups/minio-*.tar.gz | head -n -14 | xargs -r rm
 To restore:
 
 ```bash
-gunzip -c backups/db-2026-04-30.sql.gz | docker compose -f docker-compose.prod.yml \
+gunzip -c backups/db-2026-04-30.sql.gz | docker compose -f docker-compose.yml \
   --env-file .env.production exec -T postgres psql -U lomicode -d lomicode_admin
 ```
 
