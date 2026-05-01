@@ -1,55 +1,34 @@
-# LomiCode Vendor Admin — production compose file.
-#
-# Designed to "just compose": every environment variable has a sensible
-# default, so this file runs with ZERO configuration. The first boot uses
-# baked-in placeholder credentials and serves over HTTP on port 80.
-#
-# Once it's up, override any of these variables (via Hostinger's Environment
-# tab, an .env file, or your CI) for hardening:
-#
-#   DOMAIN              your domain → flips Caddy into auto-HTTPS mode
-#   NEXTAUTH_URL        https://your-domain
-#   POSTGRES_PASSWORD   replace the default
-#   S3_ACCESS_KEY       MinIO root + app credential
-#   S3_SECRET_KEY       MinIO root + app credential
-#   ADMIN_EMAIL         Let's Encrypt cert-expiry contact
-#
-# NEXTAUTH_SECRET is generated automatically on first boot if you don't
-# supply one — see docker-entrypoint.sh.
-#
-# Deploy:
-#   docker compose up -d --build
-#
-# Pull updates and rebuild only the app:
-#   git pull
-#   docker compose up -d --build app
-
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: lomicode-postgres
+    container_name: lomicode-admin-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-lomicode_admin}
-      POSTGRES_USER: ${POSTGRES_USER:-lomicode}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lomicode-change-me}
+      POSTGRES_DB: lomicode_admin
+      POSTGRES_USER: lomicode
+      POSTGRES_PASSWORD: lomicode
+    ports:
+      - "5433:5432"   # optional: map to host if needed, but Hostinger may ignore
     volumes:
       - lomicode_pg:/var/lib/postgresql/data
     networks: [internal]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lomicode} -d ${POSTGRES_DB:-lomicode_admin}"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD-SHELL", "pg_isready -U lomicode -d lomicode_admin"]
+      interval: 5s
+      timeout: 3s
       retries: 10
 
   minio:
     image: minio/minio:latest
-    container_name: lomicode-minio
+    container_name: lomicode-admin-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-lomicode}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-lomicode-change-me}
+      MINIO_ROOT_USER: lomicode
+      MINIO_ROOT_PASSWORD: lomicode-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - lomicode_minio:/data
     networks: [internal]
@@ -59,36 +38,25 @@ services:
       timeout: 3s
       retries: 5
 
-  # One-shot job that creates the releases bucket if it doesn't exist.
-  # Idempotent — `mc mb -p` ignores "already exists".
   minio-init:
     image: minio/mc:latest
-    container_name: lomicode-minio-init
+    container_name: lomicode-admin-minio-init
     depends_on:
       minio:
         condition: service_healthy
-    networks: [internal]
     entrypoint: >
       /bin/sh -c "
-      until /usr/bin/mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-lomicode} ${S3_SECRET_KEY:-lomicode-change-me} >/dev/null 2>&1; do
+      until /usr/bin/mc alias set local http://minio:9000 lomicode lomicode-secret >/dev/null 2>&1; do
         echo 'waiting for minio...'; sleep 2;
       done;
-      /usr/bin/mc mb -p local/${S3_BUCKET:-releases} || true;
+      /usr/bin/mc mb -p local/releases || true;
       echo 'minio bucket ready';
       "
     restart: "no"
+    networks: [internal]
 
   app:
-    # Pre-built image published by .github/workflows/build-and-push.yml on
-    # every push to main. Using a registry image (instead of building from
-    # ./Dockerfile here) is what makes this stack deployable to PaaS-style
-    # Docker hosts that only support `docker compose pull` (Hostinger,
-    # Coolify, Dokploy, etc.).
-    #
-    # The package must be Public on GHCR — see workflow file for the
-    # one-time settings link. Set IMAGE_TAG=<short-sha> to pin to a
-    # specific build; defaults to :latest.
-    image: ghcr.io/howsy/lomicode-vendor-admin:${IMAGE_TAG:-latest}
+    build: .   # ← Hostinger will build from your Dockerfile
     container_name: lomicode-app
     restart: unless-stopped
     depends_on:
@@ -99,35 +67,20 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
-      # ─── Auth ─────────────────────────────────────────────────────────
-      # NEXTAUTH_URL flips to https when you set DOMAIN to a real hostname.
-      # Until then we serve over HTTP and the URL is a placeholder; sign-in
-      # cookies require this to match what the browser sees, so the entrypoint
-      # script also rewrites it on first boot when DOMAIN is set.
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
-      # NEXTAUTH_SECRET is auto-generated on first boot when empty — see
-      # docker-entrypoint.sh. Persisted in the lomicode_secrets volume so
-      # the same secret survives across container recreates (else every
-      # boot would invalidate every session).
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-}
-      # ─── DB ───────────────────────────────────────────────────────────
-      DATABASE_URL: postgresql://${POSTGRES_USER:-lomicode}:${POSTGRES_PASSWORD:-lomicode-change-me}@postgres:5432/${POSTGRES_DB:-lomicode_admin}?schema=public
-      # ─── S3 / MinIO ───────────────────────────────────────────────────
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_REGION: ${S3_REGION:-us-east-1}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-lomicode}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-lomicode-change-me}
-      S3_BUCKET: ${S3_BUCKET:-releases}
+      DATABASE_URL: postgresql://lomicode:lomicode@postgres:5432/lomicode_admin?schema=public
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: lomicode
+      S3_SECRET_KEY: lomicode-secret
+      S3_BUCKET: releases
       S3_FORCE_PATH_STYLE: "true"
-      # ─── Subscription / billing ───────────────────────────────────────
       SUBSCRIPTION_GRACE_DAYS: ${SUBSCRIPTION_GRACE_DAYS:-7}
-      # ─── First-boot seed (only runs if no users exist yet) ────────────
       SEED_VENDOR_EMAIL: ${SEED_VENDOR_EMAIL:-admin@lomicode.local}
       SEED_VENDOR_PASSWORD: ${SEED_VENDOR_PASSWORD:-ChangeMe!2026}
       SEED_VENDOR_NAME: ${SEED_VENDOR_NAME:-LomiCode Admin}
     volumes:
-      # Holds auto-generated secrets that need to survive container rebuilds
-      # (NEXTAUTH_SECRET above all). Tiny — kilobytes.
       - lomicode_secrets:/app/.secrets
     networks: [internal, web]
     expose:
@@ -146,10 +99,6 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     environment:
-      # When DOMAIN is unset we fall back to `:80` — Caddy serves plain
-      # HTTP on port 80 with no cert request. Set DOMAIN later (with DNS
-      # pointing at this VPS) and Caddy switches to auto-HTTPS on its
-      # next start.
       DOMAIN: ${DOMAIN:-:80}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
     networks: [web, internal]
@@ -165,3 +114,4 @@ networks:
   internal:
     internal: false
   web:
+    external: true
